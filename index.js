@@ -1,16 +1,14 @@
 'use strict';
 var Service, Characteristic;
 
+var debug = require('debug')('CubeSensors');
+
 // CUSTOM SERVICE AND CHARACTERISTIC IDS
 var ATMOSPHERIC_PRESSURE_STYPE_ID = "B77831FD-D66A-46A4-B66D-FD7EE8DFE3CE";
 var ATMOSPHERIC_PRESSURE_CTYPE_ID = "28FDA6BC-9C2A-4DEA-AAFD-B49DB6D155AB";
 
 var NOISE_LEVEL_STYPE_ID = "8C85FD40-EB20-45EE-86C5-BCADC773E580";
 var NOISE_LEVEL_CTYPE_ID = "2CD7B6FD-419A-4740-8995-E3BFE43735AB";
-
-var THERM_HG_CTYPE_ID   = "3674CD3A-16AF-4C9D-8492-E466B753A697";
-var THERM_AWAY_CTYPE_ID = "D5806A47-948D-4707-B350-EF4637B93539";
-var THERMOSTAT_STYPE_ID = "43EB2466-3B98-457E-9EE9-BD6E735E6CBF";
 
 module.exports = function (homebridge) {
 
@@ -103,6 +101,8 @@ var NodeCache      = require("node-cache");
 var inherits       = require('util').inherits;
 var Q              = require("q");
 var _              = require("lodash");
+var sem            = require('semaphore')(1);
+
 /**
  *
  * @param log
@@ -117,17 +117,20 @@ function CubeSenorsRepository(log, api, ttl) {
 }
 
 CubeSenorsRepository.prototype = {
-  refresh: function (callback) {
+  refresh: function () {
+    var deferred = Q.defer();
+
     var datasource = {
       modules: {}
     };
     var that       = this;
-    that.log.debug("Refresh Cubesensors data from API");
+    debug("Refresh Cubesensors data from API");
 
     function getDevices() {
       var deferred = Q.defer();
       that.api.getDevices(function (err, devices) {
         if (err) {
+          debug(err);
           that.log(err);
           deferred.reject(err);
         }
@@ -141,10 +144,11 @@ CubeSenorsRepository.prototype = {
       var deferred = Q.defer();
       that.api.getDeviceInfo(device.uid, function (err, info) {
         if (err) {
+          debug(err);
           that.log(err);
           deferred.reject(err);
         }
-        that.log.debug("refreshing device info " + device.uid + " (" + device.name + ")");
+        debug("refreshing device info " + device.uid + " (" + device.name + ")");
         deferred.resolve(info);
       });
       return deferred.promise;
@@ -154,10 +158,11 @@ CubeSenorsRepository.prototype = {
       var deferred = Q.defer();
       that.api.getDeviceState(device.uid, function (err, info) {
         if (err) {
+          debug(err);
           that.log(err);
           deferred.reject(err);
         }
-        that.log.debug("refreshing device state " + device.uid + " (" + device.name + ")");
+        debug("refreshing device state " + device.uid + " (" + device.name + ")");
         deferred.resolve(info);
       });
       return deferred.promise;
@@ -192,24 +197,52 @@ CubeSenorsRepository.prototype = {
       _.forEach(deviceList, function (device) {
         datasource.modules[device.uid] = device;
       });
-      that.cache.set("datasource", datasource);
-      callback(datasource);
+
+      deferred.resolve(datasource);
     });
+
+    return deferred.promise;
   },
   load:    function (callback) {
     var that = this;
-    this.cache.get("datasource", function (err, datasource) {
-      if (err) {
-        that.log(err);
-      }
-      if (!err) {
-        if (datasource == undefined) {
-          that.refresh(callback);
-        } else {
-          callback(datasource)
-        }
-      }
+    var cb = callback;
+    debug('load CubeSensors data');
+
+    function getData(cache) {
+      var deferred = Q.defer();
+
+      sem.take(function(){
+        debug('got semaphore');
+
+        cache.get("datasource", function (err, datasource) {
+          if (err) {
+            debug(err);
+            that.log(err);
+          }
+          if (!err) {
+            if (datasource == undefined) {
+              debug('CUBE refresh from API');
+              that.refresh().then(function(data){
+                that.cache.set("datasource", data);
+                deferred.resolve(data);
+              });
+            } else {
+              debug('CUBE refresh from cache');
+              deferred.resolve(datasource)
+            }
+          }
+        });
+      });
+
+      return deferred.promise;
+    }
+
+    getData(that.cache).then(function (data){
+      debug('released semaphore');
+      sem.leave();
+       callback(data);
     });
+
   }
 };
 
@@ -226,11 +259,13 @@ function CubeSensorsPlatform(log, config) {
   var api         = new cubeSensorsAPI.CubeSensorsAPI(config["auth"]);
   var ttl         = typeof config["ttl"] !== 'undefined' ? config["ttl"] : DEFAULT_CACHE_TTL;
   this.repository = new CubeSenorsRepository(this.log, api, ttl);
-  api.on("error", function (error) {
-    that.log('ERROR - CubeSensorsCloud: ' + error);
+  api.on("error", function (err) {
+    debug(err);
+    that.log('ERROR - CubeSensorsCloud: ' + err);
   });
-  api.on("warning", function (error) {
-    that.log('WARN - CubeSensorsCloud: ' + error);
+  api.on("warning", function (err) {
+    debug(err);
+    that.log('WARN - CubeSensorsCloud: ' + err);
   });
 }
 
@@ -281,6 +316,7 @@ CubeSensorsAccessory.prototype = {
   },
 
   identify: function (callback) {
+    debug("Identify requested!");
     this.log("Identify requested!");
     callback(); // success
   },
@@ -375,7 +411,7 @@ CubeSensorsAccessory.prototype = {
     var that     = this;
     var services = [];
 
-    that.log.debug("creating services for " + this.serial + " (" + this.name + ")");
+    debug("creating services for " + this.serial + " (" + this.name + ")");
 
     // INFORMATION ///////////////////////////////////////////////////
     var informationService     = new Service.AccessoryInformation();

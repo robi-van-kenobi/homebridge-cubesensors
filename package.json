@@ -16,8 +16,10 @@
   },
   "dependencies": {
     "cubesensors-cloud": "^0.3.1",
-    "lodash": "^4.6.1",
-    "node-cache": "^3.2.0",
-    "q": "^1.4.1"
+    "debug": "^2.2.0",
+    "lodash": "^4.13.1",
+    "node-cache": "^3.2.1",
+    "q": "^1.4.1",
+    "semaphore": "^1.0.5"
   }
 }
